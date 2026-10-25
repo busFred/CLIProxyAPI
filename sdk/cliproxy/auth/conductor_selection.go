@@ -604,7 +604,8 @@ func (m *Manager) availableAuthsForRouteModelWithPriorityMode(auths []*Auth, pro
 			if resetIn < 0 {
 				resetIn = 0
 			}
-			return nil, newModelCooldownErrorWithCause(routeModel, providerForError, resetIn, lastCandidateErr)
+			cooldownErr := newModelCooldownErrorWithCause(routeModel, providerForError, resetIn, lastCandidateErr)
+			return nil, cooldownErr.withClaudeRateLimitHint(m.cooldownCandidatesForRouteModel(auths, routeModel, now), routeModel, now)
 		}
 		if unauthorizedCount == len(auths) && len(auths) > 0 {
 			terminalCause := latestUnauthorizedCandidateError(auths)
@@ -714,7 +715,23 @@ func restoreModelCooldownErrorModel(err error, requestedModel string) error {
 	if !errors.As(err, &cooldownErr) || cooldownErr == nil || cooldownErr.model != "" {
 		return err
 	}
-	return newModelCooldownErrorWithCause(requestedModel, cooldownErr.provider, cooldownErr.resetIn, cooldownErr.cause)
+	restored := newModelCooldownErrorWithCause(requestedModel, cooldownErr.provider, cooldownErr.resetIn, cooldownErr.cause)
+	restored.claudeHint = cooldownErr.claudeHint
+	return restored
+}
+
+// cooldownCandidatesForRouteModel lists the quota-blocked credentials with their
+// recovery instants, mirroring the availability check that produced the error.
+func (m *Manager) cooldownCandidatesForRouteModel(auths []*Auth, routeModel string, now time.Time) []cooldownCandidate {
+	candidates := make([]cooldownCandidate, 0, len(auths))
+	for _, candidate := range auths {
+		_, reason, next := isAuthBlockedForModel(candidate, m.selectionModelForAuth(candidate, routeModel), now)
+		if reason != blockReasonCooldown {
+			continue
+		}
+		candidates = append(candidates, cooldownCandidate{auth: candidate, next: next})
+	}
+	return candidates
 }
 
 func latestUnauthorizedCandidateError(auths []*Auth) error {

@@ -638,6 +638,7 @@ func (s *authScheduler) mixedUnavailableErrorLocked(providers []string, model st
 	var latestAuthTime time.Time
 	var latestAuthID string
 	var latestAuthErr error
+	var mixedCooldownCandidates []cooldownCandidate
 
 	for _, providerKey := range providers {
 		providerState := s.providers[providerKey]
@@ -649,6 +650,7 @@ func (s *authScheduler) mixedUnavailableErrorLocked(providers []string, model st
 			continue
 		}
 		localTotal, localCooldownCount, localUnauthorizedCount, localEarliest := shard.availabilitySummaryLocked(predicate)
+		mixedCooldownCandidates = append(mixedCooldownCandidates, shard.cooldownCandidatesLocked(predicate)...)
 		total += localTotal
 		cooldownCount += localCooldownCount
 		unauthorizedCount += localUnauthorizedCount
@@ -687,7 +689,8 @@ func (s *authScheduler) mixedUnavailableErrorLocked(providers []string, model st
 		if resetIn < 0 {
 			resetIn = 0
 		}
-		return newModelCooldownErrorWithCause(model, "", resetIn, lastCandidateErr)
+		return newModelCooldownErrorWithCause(model, "", resetIn, lastCandidateErr).
+			withClaudeRateLimitHint(mixedCooldownCandidates, model, now)
 	}
 	if unauthorizedCount == total {
 		terminalCause := latestAuthErr
@@ -1432,7 +1435,8 @@ func (m *modelScheduler) unavailableErrorLocked(provider, model string, predicat
 		if resetIn < 0 {
 			resetIn = 0
 		}
-		return newModelCooldownErrorWithCause(model, providerForError, resetIn, lastCandidateErr)
+		return newModelCooldownErrorWithCause(model, providerForError, resetIn, lastCandidateErr).
+			withClaudeRateLimitHint(m.cooldownCandidatesLocked(predicate), model, now)
 	}
 	if unauthorizedCount == total {
 		terminalCause := authErr
@@ -1555,6 +1559,25 @@ func (m *modelScheduler) availabilitySummaryLocked(predicate func(*scheduledAuth
 		}
 	}
 	return total, cooldownCount, unauthorizedCount, earliest
+}
+
+// cooldownCandidatesLocked lists the cooling entries that match predicate with
+// their recovery instants.
+func (m *modelScheduler) cooldownCandidatesLocked(predicate func(*scheduledAuth) bool) []cooldownCandidate {
+	if m == nil {
+		return nil
+	}
+	var candidates []cooldownCandidate
+	for _, entry := range m.entries {
+		if entry == nil || entry.auth == nil || entry.state != scheduledStateCooldown {
+			continue
+		}
+		if predicate != nil && !predicate(entry) {
+			continue
+		}
+		candidates = append(candidates, cooldownCandidate{auth: entry.auth, next: entry.nextRetryAt})
+	}
+	return candidates
 }
 
 // rebuildIndexesLocked reconstructs ready and blocked views from the current entry map.

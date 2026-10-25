@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -906,4 +907,131 @@ func TestClaudeStreamMultiLineDataEventsAreRecognizedAcrossChunks(t *testing.T) 
 			t.Fatalf("expected terminal error event when stream truncated after multiline tool_use containing nested message_stop line; body=%q", body)
 		}
 	})
+}
+
+type claudeUnifiedHeaderErr struct{ headers http.Header }
+
+func (e claudeUnifiedHeaderErr) Error() string {
+	return `{"type":"error","error":{"type":"rate_limit_error","message":"limit"}}`
+}
+
+func (e claudeUnifiedHeaderErr) ClaudeRateLimitHeaders() http.Header { return e.headers }
+
+func TestWriteClaudeErrorResponse_ForwardsUnifiedHeadersWithoutPassthrough(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	handler := &ClaudeCodeAPIHandler{}
+	upstream := http.Header{
+		"Anthropic-Ratelimit-Unified-Status":               {"rejected"},
+		"Anthropic-Ratelimit-Unified-Reset":                {"1893456000"},
+		"Anthropic-Ratelimit-Unified-Representative-Claim": {"seven_day"},
+		"Retry-After": {"604800"},
+		"Request-Id":  {"req_secret"},
+	}
+	msg := &interfaces.ErrorMessage{
+		StatusCode: http.StatusTooManyRequests,
+		Error:      claudeUnifiedHeaderErr{headers: upstream},
+		Addon:      upstream,
+	}
+
+	handler.WriteErrorResponse(c, msg)
+
+	header := recorder.Header()
+	if header.Get("Anthropic-Ratelimit-Unified-Status") != "rejected" ||
+		header.Get("Anthropic-Ratelimit-Unified-Reset") != "1893456000" ||
+		header.Get("Anthropic-Ratelimit-Unified-Representative-Claim") != "seven_day" {
+		t.Fatalf("unified headers missing: %v", header)
+	}
+	if header.Get("Request-Id") != "" || header.Get("Retry-After") != "" {
+		t.Fatalf("only unified headers may pass when passthrough-headers is off: %v", header)
+	}
+	if got := gjson.GetBytes(recorder.Body.Bytes(), "error.type").String(); got != "rate_limit_error" {
+		t.Fatalf("error.type = %q, want rate_limit_error", got)
+	}
+}
+
+func TestWriteClaudeErrorResponse_ProxyCooldownIsAnthropicShapedWithUnifiedHeaders(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	const model = "claude-fable-5-1"
+	next := time.Now().Add(104 * time.Minute)
+	manager := coreauth.NewManager(nil, &coreauth.RoundRobinSelector{}, nil)
+	manager.RegisterExecutor(cooldownTestExecutor{})
+	auth := &coreauth.Auth{
+		ID:       "claude-handler-cooldown",
+		Provider: "claude",
+		Status:   coreauth.StatusActive,
+		ModelStates: map[string]*coreauth.ModelState{
+			model: {
+				Status:         coreauth.StatusError,
+				Unavailable:    true,
+				NextRetryAfter: next,
+				Quota: coreauth.QuotaState{
+					Exceeded:      true,
+					Reason:        "quota",
+					NextRecoverAt: next,
+					Signals: map[string]string{
+						"Anthropic-Ratelimit-Unified-Status":               "rejected",
+						"Anthropic-Ratelimit-Unified-Representative-Claim": "five_hour",
+					},
+				},
+			},
+		},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatal(err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, "claude", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+	manager.RefreshSchedulerEntry(auth.ID)
+
+	_, err := manager.Execute(context.Background(), []string{"claude"}, coreexecutor.Request{Model: model}, coreexecutor.Options{})
+	if err == nil {
+		t.Fatal("Execute() error = nil, want cooldown")
+	}
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	(&ClaudeCodeAPIHandler{}).WriteErrorResponse(c, handlers.ExecutionErrorMessage(err))
+
+	if recorder.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429", recorder.Code)
+	}
+	header := recorder.Header()
+	if header.Get("Retry-After") == "" {
+		t.Fatal("Retry-After must be kept")
+	}
+	if header.Get("Anthropic-Ratelimit-Unified-Status") != "rejected" ||
+		header.Get("Anthropic-Ratelimit-Unified-Representative-Claim") != "five_hour" {
+		t.Fatalf("unified headers missing: %v", header)
+	}
+	reset, convErr := strconv.ParseInt(header.Get("Anthropic-Ratelimit-Unified-Reset"), 10, 64)
+	if convErr != nil || reset < next.Unix() || reset > next.Unix()+1 {
+		t.Fatalf("reset = %q, want unix seconds %d", header.Get("Anthropic-Ratelimit-Unified-Reset"), next.Unix())
+	}
+	body := recorder.Body.Bytes()
+	if gjson.GetBytes(body, "type").String() != "error" || gjson.GetBytes(body, "error.type").String() != "rate_limit_error" {
+		t.Fatalf("body is not Anthropic-shaped: %s", body)
+	}
+	if gjson.GetBytes(body, "error.message").String() == "" {
+		t.Fatalf("error.message empty: %s", body)
+	}
+}
+
+type cooldownTestExecutor struct{}
+
+func (cooldownTestExecutor) Identifier() string { return "claude" }
+func (cooldownTestExecutor) Execute(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, errors.New("unexpected upstream call")
+}
+func (cooldownTestExecutor) ExecuteStream(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+	return nil, errors.New("unexpected upstream call")
+}
+func (cooldownTestExecutor) Refresh(_ context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+	return auth, nil
+}
+func (cooldownTestExecutor) CountTokens(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, errors.New("unexpected upstream call")
+}
+func (cooldownTestExecutor) HttpRequest(context.Context, *coreauth.Auth, *http.Request) (*http.Response, error) {
+	return nil, errors.New("unexpected upstream call")
 }

@@ -614,6 +614,16 @@ func (h *ClaudeCodeAPIHandler) WriteErrorResponse(c *gin.Context, msg *interface
 		}
 	}
 
+	// Claude Code reads these to show "limit reached, resets <time>". They are
+	// forwarded even when passthrough-headers is off: the allowlist is the
+	// anthropic-ratelimit-unified-* prefix and nothing else.
+	for key, values := range claudeRateLimitHeaders(msg) {
+		c.Writer.Header().Del(key)
+		for _, value := range values {
+			c.Writer.Header().Add(key, value)
+		}
+	}
+
 	body, err := json.Marshal(h.toClaudeError(msg))
 	if err != nil {
 		body = []byte(`{"type":"error","error":{"type":"api_error","message":"Internal Server Error"}}`)
@@ -624,6 +634,23 @@ func (h *ClaudeCodeAPIHandler) WriteErrorResponse(c *gin.Context, msg *interface
 	}
 	c.Status(status)
 	_, _ = c.Writer.Write(body)
+}
+
+// claudeRateLimitHeaders collects the unified rate-limit headers for an error
+// response: those the error carries (a proxy-built model cooldown or a real
+// upstream 429) plus any already present in the upstream header addon.
+func claudeRateLimitHeaders(msg *interfaces.ErrorMessage) http.Header {
+	if msg == nil {
+		return nil
+	}
+	headers := coreauth.FilterClaudeUnifiedRateLimitHeaders(msg.Addon)
+	for key, values := range coreauth.ClaudeRateLimitResponseHeaders(msg.Error) {
+		if headers == nil {
+			headers = make(http.Header)
+		}
+		headers[key] = values
+	}
+	return headers
 }
 
 func claudeErrorText(err error) string {

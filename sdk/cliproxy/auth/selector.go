@@ -85,6 +85,9 @@ type modelCooldownError struct {
 	resetIn  time.Duration
 	provider string
 	cause    error
+	// claudeHint carries Anthropic usage-limit details for Claude-format
+	// endpoints. It is set only when every blocking credential is a Claude one.
+	claudeHint *claudeRateLimitHint
 }
 
 // NewModelCooldownError creates an error representing model-level cooldown.
