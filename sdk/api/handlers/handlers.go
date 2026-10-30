@@ -63,6 +63,11 @@ const (
 	maxStreamInterceptorHistoryBytes  = 1 << 20
 )
 
+// LogicalResponseStatusKey is a gin context key a handler sets when the HTTP
+// status it wrote differs on purpose from the upstream outcome that usage
+// records and request metrics must keep (for example a 429 sent as 503).
+const LogicalResponseStatusKey = "cliproxy.logical_response_status"
+
 // BuildErrorResponseBody builds an OpenAI-compatible JSON error response body.
 // If errText is already valid JSON, it is compacted to ensure single-line SSE compatibility
 // while preserving upstream error payloads.
@@ -657,7 +662,13 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 	newCtx = context.WithValue(newCtx, "handler", handler)
 	return newCtx, func(params ...interface{}) {
 		if c != nil {
-			logging.SetResponseStatus(cancelCtx, c.Writer.Status())
+			status := c.Writer.Status()
+			if v, ok := c.Get(LogicalResponseStatusKey); ok {
+				if logical, okInt := v.(int); okInt && logical > 0 {
+					status = logical
+				}
+			}
+			logging.SetResponseStatus(cancelCtx, status)
 		}
 		if cfg := h.CurrentConfig(); cfg != nil && cfg.RequestLog && len(params) == 1 {
 			if captured, exists := c.Get(logging.APIResponseCapturedContextKey); exists {

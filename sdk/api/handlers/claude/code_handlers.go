@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -85,6 +86,7 @@ func (h *ClaudeCodeAPIHandler) ClaudeMessages(c *gin.Context) {
 
 	// Decode claude-fable-5-dd-<reversed> model IDs back to the real model name for routing.
 	rawJSON = rewriteClaudeDDModelInBody(rawJSON)
+	markClaudeMessagesRequest(c, gjson.GetBytes(rawJSON, "model").String())
 
 	// Check if the client requested a streaming response.
 	streamResult := gjson.GetBytes(rawJSON, "stream")
@@ -624,9 +626,25 @@ func (h *ClaudeCodeAPIHandler) WriteErrorResponse(c *gin.Context, msg *interface
 		}
 	}
 
-	body, err := json.Marshal(h.toClaudeError(msg))
+	claudeErr := h.toClaudeError(msg)
+	body, err := json.Marshal(claudeErr)
 	if err != nil {
 		body = []byte(`{"type":"error","error":{"type":"api_error","message":"Internal Server Error"}}`)
+	}
+	if status == http.StatusTooManyRequests {
+		if model, ok := c.Get(claudeMessagesRequestKey); ok && c.Request != nil && isClaudeCodeTokenMode(c.Request.Header) {
+			if secs, ok := claudeResetSeconds(c.Writer.Header(), claudeNow()); ok {
+				modelName, _ := model.(string)
+				if tokenBody, errBody := buildClaudeTokenModeRateLimitBody(modelName, claudeErr.Error.Message, secs); errBody == nil {
+					body = tokenBody
+					status = http.StatusServiceUnavailable
+					c.Writer.Header().Set("X-Should-Retry", "false")
+					c.Writer.Header().Set("Retry-After", strconv.FormatInt(secs, 10))
+					// Usage/request records read the written status; keep them at 429.
+					c.Set(handlers.LogicalResponseStatusKey, http.StatusTooManyRequests)
+				}
+			}
+		}
 	}
 	appendClaudeAPIResponse(c, body)
 	if !c.Writer.Written() {
