@@ -318,3 +318,80 @@ func TestTokenModeRewriteKeepsRecordedStatus429(t *testing.T) {
 		t.Fatalf("recorded status = %d, want 429", got)
 	}
 }
+
+// exhaustingClaudeError is an upstream 429 whose own reset depends on the
+// account, mirroring the executor error the conductor returns last.
+type exhaustingClaudeError struct {
+	headers    http.Header
+	retryAfter time.Duration
+}
+
+func (e exhaustingClaudeError) Error() string {
+	return `{"type":"error","error":{"type":"rate_limit_error","message":"limit"}}`
+}
+func (e exhaustingClaudeError) StatusCode() int                     { return http.StatusTooManyRequests }
+func (e exhaustingClaudeError) IsCredentialScoped() bool            { return true }
+func (e exhaustingClaudeError) RetryAfter() *time.Duration          { return &e.retryAfter }
+func (e exhaustingClaudeError) ClaudeRateLimitHeaders() http.Header { return e.headers.Clone() }
+func (e exhaustingClaudeError) Headers() http.Header                { return e.headers.Clone() }
+
+type exhaustingClaudeExecutor struct {
+	cooldownTestExecutor
+	calls *int
+}
+
+func (e exhaustingClaudeExecutor) Execute(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	*e.calls++
+	d, claim := 2*time.Hour, "five_hour"
+	if *e.calls%2 == 0 {
+		d, claim = 4*time.Hour, "seven_day"
+	}
+	return coreexecutor.Response{}, exhaustingClaudeError{
+		retryAfter: d,
+		headers: http.Header{
+			"Anthropic-Ratelimit-Unified-Status":               {"rejected"},
+			"Anthropic-Ratelimit-Unified-Reset":                {strconv.FormatInt(time.Now().Add(d).Unix(), 10)},
+			"Anthropic-Ratelimit-Unified-Representative-Claim": {claim},
+			"Retry-After": {strconv.Itoa(int(d / time.Second))},
+		},
+	}
+}
+
+func TestWriteErrorResponse_TokenModeExhaustingRequestReportsEarliestReset(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	const model = "claude-fable-5-exhausting"
+	calls := 0
+	manager := coreauth.NewManager(nil, &coreauth.RoundRobinSelector{}, nil)
+	manager.SetRetryConfig(0, 0, 0)
+	manager.RegisterExecutor(exhaustingClaudeExecutor{calls: &calls})
+	for _, id := range []string{"claude-exhausting-a", "claude-exhausting-b"} {
+		auth := &coreauth.Auth{ID: id, Provider: "claude", Status: coreauth.StatusActive}
+		if _, err := manager.Register(context.Background(), auth); err != nil {
+			t.Fatal(err)
+		}
+		registry.GetGlobalRegistry().RegisterClient(id, "claude", []*registry.ModelInfo{{ID: model}})
+		authID := id
+		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(authID) })
+		manager.RefreshSchedulerEntry(id)
+	}
+	_, err := manager.Execute(context.Background(), []string{"claude"}, coreexecutor.Request{Model: model}, coreexecutor.Options{})
+	if err == nil || calls != 2 {
+		t.Fatalf("err = %v, upstream calls = %d, want both accounts tried", err, calls)
+	}
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = tokenModeRequest("claude-cli/2.1.312")
+	markClaudeMessagesRequest(c, "claude-opus-5-5")
+	(&ClaudeCodeAPIHandler{}).WriteErrorResponse(c, handlers.ExecutionErrorMessage(err))
+	assertTokenModeResponse(t, recorder, c)
+
+	// The second account would have said 4h; the earliest recovery is 2h.
+	retry, _ := strconv.Atoi(recorder.Header().Get("Retry-After"))
+	if retry < 7190 || retry > 7205 {
+		t.Fatalf("Retry-After = %d, want ~7200 (text matches via assertTokenModeResponse)", retry)
+	}
+	if got := recorder.Header().Get("Anthropic-Ratelimit-Unified-Representative-Claim"); got != "five_hour" {
+		t.Fatalf("claim = %q, want five_hour", got)
+	}
+}

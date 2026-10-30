@@ -292,6 +292,12 @@ func SafeResponseHeaders(err error) http.Header {
 		}
 		return nil
 	}
+	// The earliest Claude recovery outranks the (later) per-account deadline a
+	// trusted annotation recorded for the last attempted upstream error.
+	var adjusted *claudeCooldownAdjustedError
+	if errors.As(err, &adjusted) && adjusted != nil {
+		return adjusted.SafeResponseHeaders()
+	}
 	var trusted *trustedRetryAfterError
 	if errors.As(err, &trusted) && trusted != nil {
 		return trusted.SafeResponseHeaders()
