@@ -228,9 +228,11 @@ func adjustClaudeUnifiedHeaders(upstream http.Header, hint *claudeRateLimitHint)
 
 // withEarliestClaudeCooldownReset adjusts the final error of a request that
 // exhausted every Claude credential. When err is an upstream 429 with rejected
-// unified headers and a fresh request would now get a Claude model cooldown,
-// the reported reset and claim become that cooldown's. Otherwise err is returned unchanged. Home mode owns its own
-// credential pool and timing, so it is left alone.
+// unified headers and every credential is known to be unavailable (a model
+// cooldown, or recorded windows that have not reset), the reported reset and
+// claim become those of the earliest recovery. Otherwise err is returned
+// unchanged. Home mode owns its own credential pool and timing, so it is left
+// alone.
 func (m *Manager) withEarliestClaudeCooldownReset(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, err error) error {
 	if m == nil || err == nil || m.HomeEnabled() || statusCodeFromError(err) != http.StatusTooManyRequests {
 		return err
@@ -253,9 +255,11 @@ func (m *Manager) withEarliestClaudeCooldownReset(ctx context.Context, providers
 }
 
 // claudeCooldownHintForModel returns the hint a fresh request for model would
-// carry on its model cooldown error, or nil when it would not get one (some
-// eligible credential is available, mixed providers, short backoff, ...). It
-// ignores the per-request tried set and has no selection side effects.
+// carry on its model cooldown error. Without that error (cooling disabled, or a
+// cooldown that expired before its window reset) it falls back to the recorded
+// unified windows. It returns nil when some eligible credential may be
+// available, for mixed providers or for short backoff. It ignores the
+// per-request tried set and has no selection side effects.
 func (m *Manager) claudeCooldownHintForModel(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, now time.Time) *claudeRateLimitHint {
 	providerSet := make(map[string]struct{}, len(providers))
 	for _, provider := range providers {
@@ -307,7 +311,31 @@ func (m *Manager) claudeCooldownHintForModel(ctx context.Context, providers []st
 	if errors.As(err, &cooldown) && cooldown != nil {
 		return cooldown.claudeHint
 	}
-	return nil
+	if err != nil {
+		return nil
+	}
+	return m.claudeSignalHintLocked(candidates, model, now)
+}
+
+// claudeSignalHintLocked builds the hint from the recorded unified windows when
+// the proxy holds no cooldown that blocks every candidate: cooling is disabled,
+// or a cooldown expired before its window reset. A credential not in cooldown
+// counts as available now unless its signals show an exhausted window that has
+// not reset, so one credential without that evidence yields nil and the
+// upstream headers stand. Callers hold m.mu.
+func (m *Manager) claudeSignalHintLocked(auths []*Auth, model string, now time.Time) *claudeRateLimitHint {
+	candidates := make([]cooldownCandidate, 0, len(auths))
+	for _, candidate := range auths {
+		blocked, reason, next := isAuthBlockedForModel(candidate, m.selectionModelForAuth(candidate, model), now)
+		switch {
+		case !blocked:
+			next = now
+		case reason != blockReasonCooldown:
+			continue
+		}
+		candidates = append(candidates, cooldownCandidate{auth: candidate, next: next})
+	}
+	return claudeRateLimitHintFor(candidates, model, 0, now)
 }
 
 // claudeRateLimitHintFor builds the hint for a cooldown that blocks every
