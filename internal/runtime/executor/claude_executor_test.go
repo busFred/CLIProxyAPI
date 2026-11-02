@@ -1288,6 +1288,17 @@ func TestClaudeExecutor_ConfirmedVSCodeOAuthPreservesToolNames(t *testing.T) {
 }
 
 func TestClaudeExecutor_ConfirmedSDKTSAgentSDKRequestPassesThroughWithRealProfile(t *testing.T) {
+	assertConfirmedAgentSDKRequestPassesThrough(t, "sdk-ts")
+}
+
+// T3 Code sends CLAUDE_CODE_ENTRYPOINT=t3-code (pingdotgg/t3code#28410). Its
+// entrypoint must reach Anthropic unchanged instead of being cloaked as cli.
+func TestClaudeExecutor_ConfirmedT3CodeAgentSDKRequestPassesThroughWithRealProfile(t *testing.T) {
+	assertConfirmedAgentSDKRequestPassesThrough(t, "t3-code")
+}
+
+func assertConfirmedAgentSDKRequestPassesThrough(t *testing.T, entrypoint string) {
+	t.Helper()
 	helps.ResetClaudeDeviceProfileCache()
 	var seenBody []byte
 	var seenHeaders http.Header
@@ -1301,8 +1312,8 @@ func TestClaudeExecutor_ConfirmedSDKTSAgentSDKRequestPassesThroughWithRealProfil
 
 	const sessionID = "33333333-4444-4555-8666-777777777777"
 	const userID = `{"account_uuid":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","device_id":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","session_id":"33333333-4444-4555-8666-777777777777"}`
-	const sdkTSUA = "claude-cli/2.1.304 (external, sdk-ts, agent-sdk/0.3.276)"
-	const billingHeader = "x-anthropic-billing-header: cc_version=2.1.304.179; cc_entrypoint=sdk-ts;"
+	sdkTSUA := "claude-cli/2.1.304 (external, " + entrypoint + ", agent-sdk/0.3.276)"
+	billingHeader := "x-anthropic-billing-header: cc_version=2.1.304.179; cc_entrypoint=" + entrypoint + ";"
 	payload := []byte(`{"model":"claude-sonnet-5-5","max_tokens":1024,"system":[{"type":"text","text":` + fmt.Sprintf("%q", billingHeader) + `},{"type":"text","text":"You are Claude Code, Anthropic's official CLI for Claude, running within the Claude Agent SDK.","cache_control":{"type":"ephemeral","ttl":"1h"}},{"type":"text","text":"t3-code-system-prompt","cache_control":{"type":"ephemeral","ttl":"1h"}}],"tools":[{"name":"Agent","description":"subagent","input_schema":{"type":"object"}},{"name":"Bash","description":"shell","input_schema":{"type":"object"}}],"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}],"metadata":{"user_id":` + fmt.Sprintf("%q", userID) + `},"thinking":{"type":"adaptive","display":"summarized"},"output_config":{"effort":"low"}}`)
 	incoming := http.Header{
 		"User-Agent":     {sdkTSUA},
@@ -1345,8 +1356,8 @@ func TestClaudeExecutor_ConfirmedSDKTSAgentSDKRequestPassesThroughWithRealProfil
 	if got := gjson.GetBytes(seenBody, "system.#").Int(); got != 3 {
 		t.Fatalf("system block count = %d, want 3: %s", got, seenBody)
 	}
-	if got := gjson.GetBytes(seenBody, "system.0.text").String(); !strings.HasPrefix(got, "x-anthropic-billing-header: cc_version=2.1.304.179; cc_entrypoint=sdk-ts; cch=") {
-		t.Fatalf("system.0.text = %q, want sdk-ts billing header with signed cch", got)
+	if got := gjson.GetBytes(seenBody, "system.0.text").String(); !strings.HasPrefix(got, "x-anthropic-billing-header: cc_version=2.1.304.179; cc_entrypoint="+entrypoint+"; cch=") {
+		t.Fatalf("system.0.text = %q, want %s billing header with signed cch", got, entrypoint)
 	}
 	if got := gjson.GetBytes(seenBody, "system.1.text").String(); got != "You are Claude Code, Anthropic's official CLI for Claude, running within the Claude Agent SDK." {
 		t.Fatalf("system.1.text = %q, want Agent SDK CLI identity preserved", got)

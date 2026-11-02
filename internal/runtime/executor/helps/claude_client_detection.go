@@ -39,6 +39,7 @@ var claudeCodeSubclientByEntrypoint = map[string]string{
 	"sdk-cli":                   "claude-code-cli-sdk",
 	"sdk-ts":                    "claude-code-sdk-ts",
 	"sdk-py":                    "claude-code-sdk-py",
+	"t3-code":                   "t3-code",
 	"claude-vscode":             "claude-code-vscode",
 	"claude-code-github-action": "claude-code-gh-action",
 	"local-agent":               "claude-local-agent",
@@ -63,10 +64,16 @@ var claudeCodeSubclientByEntrypoint = map[string]string{
 // Only product surfaces with verified 2.1.220+ wire behavior are eligible for
 // pass-through. Other first-party-looking entrypoints are cloaked until their
 // CPA-reachable request shape has been captured and reviewed.
+//
+// t3-code is T3 Code's Agent SDK (TypeScript) client, which sets
+// CLAUDE_CODE_ENTRYPOINT=t3-code since pingdotgg/t3code#28410. Captured on
+// Claude Code 2.1.316 with agent-sdk 0.3.276: the request is byte-for-byte the
+// sdk-ts shape except the entrypoint in the User-Agent and cc_entrypoint.
 var nativeClaudeEntrypoints = map[string]bool{
 	"cli":           true,
 	"sdk-cli":       true,
 	"sdk-ts":        true,
+	"t3-code":       true,
 	"claude-vscode": true,
 }
 
