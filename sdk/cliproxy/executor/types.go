@@ -48,6 +48,8 @@ const (
 	FinalizedResponseFormatCallbackMetadataKey = "finalized_response_format_callback"
 	// ExecutionSessionMetadataKey identifies a long-lived downstream execution session.
 	ExecutionSessionMetadataKey = "execution_session_id"
+	// CacheTTLMetadataKey stores the last prompt-cache breakpoint lifetime.
+	CacheTTLMetadataKey = "cache_ttl"
 	// DerivedSessionIDMetadataKey stores a stable session identity inferred from request context.
 	// It may be used to derive a provider session identity.
 	DerivedSessionIDMetadataKey = "derived_session_id"
