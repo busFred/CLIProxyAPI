@@ -3,6 +3,7 @@ package claude
 import (
 	"encoding/json"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -116,4 +117,15 @@ func buildClaudeTokenModeRateLimitBody(model, upstreamMessage string, seconds in
 	}{Error: struct {
 		Message string `json:"message"`
 	}{Message: text}})
+}
+
+// claudeResetSuffix matches the " (reset after <duration>)" that upstream appends
+// to model-cooldown 429 messages.
+var claudeResetSuffix = regexp.MustCompile(` \(reset after [0-9hms.µn ]+\)$`)
+
+// trimClaudeResetSuffix drops upstream's cooldown suffix so the token-mode 503
+// body carries exactly one "reset after": the earliest recovery appended by
+// buildClaudeTokenModeRateLimitBody.
+func trimClaudeResetSuffix(message string) string {
+	return claudeResetSuffix.ReplaceAllString(strings.TrimSpace(message), "")
 }

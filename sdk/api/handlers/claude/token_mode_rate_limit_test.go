@@ -201,6 +201,9 @@ func assertTokenModeResponse(t *testing.T, recorder *httptest.ResponseRecorder, 
 	if m == nil || !strings.HasPrefix(text, "[claude/claude-opus-5-5] [429]: ") {
 		t.Fatalf("message mismatch: %q", text)
 	}
+	if n := strings.Count(text, "(reset after "); n != 1 {
+		t.Fatalf("message carries %d reset-after texts, want exactly 1 (upstream's cooldown suffix must be trimmed): %q", n, text)
+	}
 	total := 0
 	for i, mult := range []int{3600, 60, 1} {
 		if m[i+1] != "" {
