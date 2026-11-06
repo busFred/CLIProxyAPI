@@ -55,6 +55,8 @@ func (s *Server) setupRoutes() {
 	s.engine.HEAD("/healthz", healthzHandler)
 
 	s.engine.GET("/management.html", s.serveManagementControlPanel)
+	// Muse Code CLI fetches its model catalog from the API host root, not under /v1.
+	s.engine.GET("/muse-code/models", AuthMiddleware(s.accessManager), s.metaMuseCodeModels)
 	openaiHandlers := openai.NewOpenAIAPIHandler(s.handlers)
 	geminiHandlers := gemini.NewGeminiAPIHandler(s.handlers)
 	claudeCodeHandlers := claude.NewClaudeCodeAPIHandler(s.handlers)

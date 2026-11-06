@@ -408,3 +408,12 @@ func isMetaSubscriptionQuota(statusCode int, body []byte) bool {
 
 // SupportsApplyPatch reports the actual executor contract, independent of its provider name.
 func (e *MetaExecutor) SupportsApplyPatch() bool { return e != nil }
+
+// MetaMuseCodeURL returns a Muse Code endpoint such as /muse-code/models on the
+// host of the credential's API base URL (https://api.meta.ai/v1 serves it at
+// https://api.meta.ai/muse-code/models).
+func MetaMuseCodeURL(a *cliproxyauth.Auth, path string) string {
+	baseURL, _ := metaCreds(a)
+	baseURL = strings.TrimSuffix(strings.TrimRight(strings.TrimSpace(baseURL), "/"), "/v1")
+	return baseURL + "/" + strings.TrimLeft(path, "/")
+}
