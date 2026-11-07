@@ -113,14 +113,26 @@ func enrichAuthSelectionError(err error, providers []string, model string) error
 	return enriched
 }
 
+// ErrorResponseAdjuster lets a route rewrite an error body and the response
+// headers right before WriteErrorResponseWith writes them. It returns the body
+// to send.
+type ErrorResponseAdjuster func(msg *interfaces.ErrorMessage, body []byte, header http.Header) []byte
+
 // WriteErrorResponse writes an error message to the response writer using the HTTP status embedded in the message.
 func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.ErrorMessage) {
+	h.WriteErrorResponseWith(c, msg, nil)
+}
+
+// WriteErrorResponseWith is WriteErrorResponse with a route-scoped adjuster
+// applied to the final body and headers. A nil adjust behaves like
+// WriteErrorResponse.
+func (h *BaseAPIHandler) WriteErrorResponseWith(c *gin.Context, msg *interfaces.ErrorMessage, adjust ErrorResponseAdjuster) {
 	status := http.StatusInternalServerError
 	if msg != nil && msg.StatusCode > 0 {
 		status = msg.StatusCode
 	}
 	if msg != nil && msg.DirectResponse {
-		writeDirectErrorResponse(c, status, msg)
+		writeDirectErrorResponse(c, status, msg, adjust)
 		return
 	}
 	if msg != nil && msg.Error != nil {
@@ -157,6 +169,9 @@ func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.Erro
 		errCause = msg.Error
 	}
 	body := BuildErrorResponseBodyWithError(status, errText, errCause)
+	if adjust != nil && !c.Writer.Written() {
+		body = adjust(msg, body, c.Writer.Header())
+	}
 	// Append first to preserve upstream response logs, then drop duplicate payloads if already recorded.
 	var previous []byte
 	if existing, exists := c.Get("API_RESPONSE"); exists {
@@ -181,7 +196,7 @@ func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.Erro
 	_, _ = c.Writer.Write(body)
 }
 
-func writeDirectErrorResponse(c *gin.Context, status int, msg *interfaces.ErrorMessage) {
+func writeDirectErrorResponse(c *gin.Context, status int, msg *interfaces.ErrorMessage, adjust ErrorResponseAdjuster) {
 	for key, values := range FilterUpstreamHeaders(msg.Headers) {
 		if len(values) == 0 || IsCPAReservedResponseHeader(key) {
 			continue
@@ -192,6 +207,9 @@ func writeDirectErrorResponse(c *gin.Context, status int, msg *interfaces.ErrorM
 		}
 	}
 	body := bytes.Clone(msg.Body)
+	if adjust != nil && !c.Writer.Written() {
+		body = adjust(msg, body, c.Writer.Header())
+	}
 	appendAPIResponse(c, body)
 	if !c.Writer.Written() && c.Writer.Header().Get("Content-Type") == "" {
 		c.Writer.Header().Set("Content-Type", "application/json")

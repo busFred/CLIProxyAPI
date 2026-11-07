@@ -800,19 +800,14 @@ func buildResponsesWebsocketErrorPayload(errMsg *interfaces.ErrorMessage) ([]byt
 		return nil, errSet
 	}
 
+	headers := &responsesWebsocketHeaders{}
 	if errMsg != nil {
-		headersDoc := ojson.NewDoc([]byte(`{}`))
-		hasHeaders := false
 		trustedDeadline := coreauth.HasTrustedRetryDeadline(errMsg.Error)
 		for key, values := range coreauth.SafeResponseHeaders(errMsg.Error) {
 			if len(values) == 0 || strings.TrimSpace(values[0]) == "" {
 				continue
 			}
-			headerPath := strings.ReplaceAll(strings.ReplaceAll(key, `\\`, `\\\\`), ".", `\\.`)
-			if errSet := headersDoc.Set(headerPath, values[0]); errSet != nil {
-				return nil, errSet
-			}
-			hasHeaders = true
+			headers.Set(key, values[0])
 		}
 		for key, values := range errMsg.Addon {
 			if len(values) == 0 || strings.TrimSpace(values[0]) == "" {
@@ -821,16 +816,20 @@ func buildResponsesWebsocketErrorPayload(errMsg *interfaces.ErrorMessage) ([]byt
 			if trustedDeadline && http.CanonicalHeaderKey(key) == "Retry-After" {
 				continue
 			}
-			headerPath := strings.ReplaceAll(strings.ReplaceAll(key, `\\`, `\\\\`), ".", `\\.`)
-			if errSet := headersDoc.Set(headerPath, values[0]); errSet != nil {
-				return nil, errSet
-			}
-			hasHeaders = true
+			headers.Set(key, values[0])
 		}
-		if hasHeaders {
-			if errSet := payloadDoc.SetRawBytes("headers", headersDoc.Bytes()); errSet != nil {
+	}
+	body = applyResponsesErrorPolicy(errCause, body, headers)
+	if len(headers.keys) > 0 {
+		headersDoc := ojson.NewDoc([]byte(`{}`))
+		for i, key := range headers.keys {
+			headerPath := strings.ReplaceAll(strings.ReplaceAll(key, `\\`, `\\\\`), ".", `\\.`)
+			if errSet := headersDoc.Set(headerPath, headers.values[i]); errSet != nil {
 				return nil, errSet
 			}
+		}
+		if errSet := payloadDoc.SetRawBytes("headers", headersDoc.Bytes()); errSet != nil {
+			return nil, errSet
 		}
 	}
 
