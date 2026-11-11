@@ -181,6 +181,7 @@ func (e *MetaExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 			eventData := bytes.TrimSpace(trimmedLine[len(dataTag):])
 			eventType := ojson.GetBytesNoCopy(eventData, "type").String()
 			if isMetaSubscriptionUsageEvent(eventType, eventData) {
+				observeMetaSubscriptionUsage(ctx, eventData)
 				pendingEventLine = nil
 				filteringSubscriptionUsage = false
 				skipFilteredBlankLine = true

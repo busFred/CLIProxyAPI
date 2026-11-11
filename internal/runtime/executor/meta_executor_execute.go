@@ -11,6 +11,7 @@ import (
 
 	"github.com/MoeForge/moego/ojson"
 	"github.com/google/uuid"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
@@ -160,6 +161,7 @@ func (e *MetaExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 		return resp, wrapMetaUpstreamError(httpResp.StatusCode, data)
 	}
 
+	observeMetaSubscriptionUsageBody(ctx, data)
 	var upstreamUsage helps.StreamUsageBuffer
 	out, errCompleted := e.translateMetaCompleted(ctx, req, prepared, data, &upstreamUsage)
 	if errCompleted != nil {
@@ -438,6 +440,34 @@ func isMetaSubscriptionUsageEvent(eventType string, eventData []byte) bool {
 		return true
 	}
 	return false
+}
+
+// observeMetaSubscriptionUsage records the subscription usage carried by a
+// filtered response.subscription_usage event as synthetic X-Muse-Subscription-*
+// response headers. They reach the request's usage record only; the event
+// itself stays filtered from client output.
+func observeMetaSubscriptionUsage(ctx context.Context, eventData []byte) {
+	logging.MergeResponseHeaders(ctx, helps.ParseMetaSubscriptionUsageHeaders(eventData))
+}
+
+// observeMetaSubscriptionUsageBody scans a whole upstream body (SSE or plain
+// JSON) for subscription usage. It runs before translation because the event
+// may follow response.completed, after which translation stops reading.
+func observeMetaSubscriptionUsageBody(ctx context.Context, data []byte) {
+	if trimmed := bytes.TrimSpace(data); ojson.ValidBytes(trimmed) {
+		observeMetaSubscriptionUsage(ctx, trimmed)
+		return
+	}
+	for _, line := range bytes.Split(data, []byte("\n")) {
+		trimmedLine := bytes.TrimSpace(line)
+		if !bytes.HasPrefix(trimmedLine, dataTag) {
+			continue
+		}
+		eventData := bytes.TrimSpace(trimmedLine[len(dataTag):])
+		if isMetaSubscriptionUsageEvent(ojson.GetBytesNoCopy(eventData, "type").String(), eventData) {
+			observeMetaSubscriptionUsage(ctx, eventData)
+		}
+	}
 }
 
 func wrapMetaUpstreamError(statusCode int, body []byte) error {
