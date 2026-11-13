@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"maps"
 	"net/http"
 	"strconv"
 	"strings"
@@ -96,6 +97,7 @@ type cooldownCandidate struct {
 type claudeRateLimitHint struct {
 	claim   string
 	resetAt time.Time
+	signals map[string]string
 }
 
 // withClaudeRateLimitHint records Claude usage-limit details on the error when
@@ -110,6 +112,8 @@ func (e *modelCooldownError) withClaudeRateLimitHint(candidates []cooldownCandid
 	// outlasting a short cooldown). Retry-After and the message must agree
 	// with it, so resetIn follows the hint whenever the hint is later.
 	if e.claudeHint != nil {
+		e.claudeCooldown = true
+		e.claudeSignals = maps.Clone(e.claudeHint.signals)
 		if untilHint := e.claudeHint.resetAt.Sub(now); untilHint > e.resetIn {
 			e.resetIn = untilHint
 		}
@@ -368,6 +372,36 @@ func claudeRateLimitHintFor(candidates []cooldownCandidate, model string, resetI
 			continue
 		}
 		signals, modelScoped := claudeSignalsForModel(candidate.auth, model)
+		if candidate.next.After(now) {
+			// Active cooldown metadata wins over newer observations from an
+			// out-of-order completion. Preserve upstream's RPM/challenge exclusions.
+			if ok, retained := claudeUnifiedCooldownForAuth(candidate.auth, model, now); ok {
+				if len(retained) > 0 {
+					quota := candidate.auth.Quota
+					state := existingModelState(candidate.auth, model)
+					if quota.Exceeded && quota.Reason == "credential_quota" && quota.NextRecoverAt.After(now) &&
+						(state == nil || !state.NextRetryAfter.After(quota.NextRecoverAt)) {
+						// Credential snapshots can come from a different model. Only
+						// apply a family window if this model recorded that snapshot.
+						modelScoped = modelScoped && maps.Equal(signals, retained)
+					}
+					signals = retained
+				}
+			} else {
+				quota := candidate.auth.Quota
+				if state := existingModelState(candidate.auth, model); state != nil {
+					if state.credentialQuotaPropagated || state.Quota.Reason == "credential_quota" {
+						state = state.credentialQuotaShadow
+					}
+					if state != nil {
+						quota = state.Quota
+					}
+				}
+				if quota.cooldownEvaluated || strings.EqualFold(strings.TrimSpace(quota.Reason), "cloudflare challenge") {
+					return nil
+				}
+			}
+		}
 		at, claim := claudeAvailableAt(signals, modelScoped, candidate.next, now)
 		if first == nil || at.Before(firstAt) {
 			first, firstAt, firstClaim, firstSigs = candidate, at, claim, signals
@@ -401,7 +435,7 @@ func claudeRateLimitHintFor(candidates []cooldownCandidate, model string, resetI
 			claim = claudeClaimSevenDay
 		}
 	}
-	return &claudeRateLimitHint{claim: claim, resetAt: resetAt}
+	return &claudeRateLimitHint{claim: claim, resetAt: resetAt, signals: firstSigs}
 }
 
 // claudeAvailableAt returns when a credential can serve the model again: the

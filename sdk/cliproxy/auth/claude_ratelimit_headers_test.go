@@ -294,3 +294,91 @@ func TestModelCooldown_ClaudeHintOnEveryCooldownConstructionPath(t *testing.T) {
 		}
 	})
 }
+
+func TestClaudeCooldownMerge_UsesEarliestActualRecoveryInAllHeaders(t *testing.T) {
+	const model = "claude-fable-5-1"
+	now := time.Now()
+	// The first proxy cooldown ends sooner, but its weekly window makes the
+	// second account the first one that can actually serve this model.
+	auths := []*Auth{
+		claudeCooldownAuth(t.Name()+"-weekly", now.Add(10*time.Minute), windowSignals(now, map[string][3]string{
+			"7d": {"rejected", "1", "3h"},
+		})),
+		claudeCooldownAuth(t.Name()+"-session", now.Add(40*time.Minute), windowSignals(now, map[string][3]string{
+			"5h": {"rejected", "1", "1h"},
+		})),
+	}
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	for _, path := range []string{"selector", "route", "scheduler"} {
+		t.Run(path, func(t *testing.T) {
+			var err error
+			switch path {
+			case "selector":
+				_, err = getAvailableAuths(auths, "claude", model, now)
+			case "route":
+				_, err = manager.availableAuthsForRouteModel(auths, "claude", model, now)
+			case "scheduler":
+				err = executeIntoClaudeCooldown(t, "claude", auths...)
+			}
+			var cooldown *modelCooldownError
+			if !errors.As(err, &cooldown) {
+				t.Fatalf("error = %v, want model cooldown", err)
+			}
+			for _, headers := range []http.Header{cooldown.Headers(), ClaudeRateLimitResponseHeaders(err)} {
+				assertUnifiedReset(t, headers, now.Add(time.Hour))
+				if got := headers.Get(claudeUnifiedClaimHeader); got != claudeClaimFiveHour {
+					t.Fatalf("claim = %q, want five_hour from earliest actual recovery", got)
+				}
+			}
+			full := cooldown.Headers()
+			if got := full.Get("Anthropic-Ratelimit-Unified-5h-Status"); got != "rejected" {
+				t.Fatalf("5h status = %q, want winning account's window", got)
+			}
+			if full.Get("Anthropic-Ratelimit-Unified-5h-Reset") != full.Get(claudeUnifiedResetHeader) {
+				t.Fatalf("window and unified reset disagree: %v", full)
+			}
+			seconds, errParse := strconv.ParseInt(full.Get("Retry-After"), 10, 64)
+			if errParse != nil || seconds < 3595 || seconds > 3601 {
+				t.Fatalf("Retry-After = %q, want about 1h", full.Get("Retry-After"))
+			}
+		})
+	}
+}
+
+func TestClaudeCooldownMerge_ExclusionsApplyToClaudeResponseHeaders(t *testing.T) {
+	const model = "claude-fable-5-1"
+	now := time.Now()
+	for _, reason := range []string{"quota", "cloudflare challenge"} {
+		t.Run(reason, func(t *testing.T) {
+			auth := claudeCooldownAuth(t.Name(), now.Add(10*time.Minute), map[string]string{
+				claudeUnifiedStatusHeader: "rejected",
+				claudeUnifiedClaimHeader:  "seven_day",
+			})
+			quota := &auth.ModelStates[model].Quota
+			quota.Reason = reason
+			// An evaluated RPM cooldown must not borrow an earlier quota observation.
+			quota.cooldownEvaluated = true
+			err := executeIntoClaudeCooldown(t, "claude", auth)
+			if got := ClaudeRateLimitResponseHeaders(err); len(got) != 0 {
+				t.Fatalf("excluded cooldown leaked Claude headers: %v", got)
+			}
+		})
+	}
+}
+
+func TestClaudeCooldownMerge_CredentialSignalsDoNotApplyOtherModelsWeeklyWindow(t *testing.T) {
+	now := time.Now()
+	const model = "claude-opus-4-8"
+	auth := hintAuth(t.Name(), model, windowSignals(now, map[string][3]string{
+		"5h": {"allowed", "0.2", "1h"},
+	}), true)
+	signals := windowSignals(now, map[string][3]string{"7d_oi": {"rejected", "1", "72h"}})
+	auth.Quota = QuotaState{
+		Exceeded: true, Reason: "credential_quota", NextRecoverAt: now.Add(time.Hour),
+		Signals: signals, cooldownSignals: signals, cooldownEvaluated: true,
+	}
+	hint := claudeRateLimitHintFor([]cooldownCandidate{{auth: auth, next: now.Add(time.Hour)}}, model, time.Hour, now)
+	if hint == nil || !hint.resetAt.Equal(now.Add(time.Hour)) {
+		t.Fatalf("hint = %+v, want 1h cooldown without another model's 72h weekly window", hint)
+	}
+}
